@@ -3,82 +3,32 @@
 # Copyright 2013 Brett Kelly
 # All rights reserved.
 
-import thrift.protocol.TBinaryProtocol as TBinaryProtocol
-import thrift.transport.THttpClient as THttpClient
-import evernote.edam.userstore.UserStore as UserStore
-import evernote.edam.userstore.constants as UserStoreConstants
-import evernote.edam.notestore.NoteStore as NoteStore
 import evernote.edam.type.ttypes as Types
-import evernote.edam.error.ttypes as Errors
-
-import time
+from evernote.api.client import EvernoteClient
 
 
 ## Determines to which Evernote host we're connecting
 TESTING = True
 
-def getEvernoteHost():
-    host = 'sandbox' if TESTING else 'www'
-    return 'https://%s.evernote.com' % host
-    
-def getUserStoreInstance():
-	userStoreUri = "%s/edam/user" % getEvernoteHost()
-	userStoreHttpClient = THttpClient.THttpClient(userStoreUri)
-	userStoreProtocol = TBinaryProtocol.TBinaryProtocol(userStoreHttpClient)
-	userStore = UserStore.Client(userStoreProtocol)
-	print "Created UserStore.Client instance"
-	return userStore
+# bypass the dev token prompt by populating this variable.
+auth_token = ""
 
-def getBusinessNoteStoreInstance(bNoteStoreUrl):
-    "Create and return an instance of NoteStore.Client to interface with Business"
-    bNoteStoreHttpClient = THttpClient.THttpClient(bNoteStoreUrl)
-    bNoteStoreProtocol = TBinaryProtocol.TBinaryProtocol(bNoteStoreHttpClient)
-    bNoteStore = NoteStore.Client(bNoteStoreUrl)
-    return bNoteStore
 
-def getNoteStoreInstance(authToken, userStore):
-	try:
-		noteStoreUrl = userStore.getNoteStoreUrl(authToken)
-	except Errors.EDAMUserException, ue:
-		print "Error: your dev token is probably wrong; double-check it."
-		print ue
-		return None
+def get_non_empty_user_input(prompt):
+    "Prompt the user for input, disallowing empty responses"
+    uinput = raw_input(prompt)
+    if uinput:
+        return uinput
+    print "This can't be empty. Try again."
+    return get_non_empty_user_input(prompt)
 
-	noteStoreHttpClient = THttpClient.THttpClient(noteStoreUrl)
-	noteStoreProtocol = TBinaryProtocol.TBinaryProtocol(noteStoreHttpClient)
-	noteStore = NoteStore.Client(noteStoreProtocol)
-	print "Created NoteStore.Client instance"
-	return noteStore
 
-def authenticateToBusiness(authToken):
-    "Authenticate with Evernote Business, return AuthenticationResult instance"
-    try:
-        bAuthResult = userStore.authenticateToBusiness(authToken)
-    except Errors.EDAMUserException, e:
-        print e
-        return None
-    except Errors.EDAMSystemException, e:
-        print e
-        return None
+if not auth_token:
+    auth_token = get_non_empty_user_input("Enter your dev token: ")
 
-    return bAuthResult
-
-def getNonEmptyUserInput(prompt):
-	"Prompt the user for input, disallowing empty responses"
-	uinput = raw_input(prompt)
-	if uinput:
-		return uinput
-	print "This can't be empty. Try again."
-	return getNonEmptyUserInput(prompt)
-
-authToken = "" # bypass the dev token prompt by populating this variable.
-
-if not authToken:
-	authToken = getNonEmptyUserInput("Enter your dev token: ")
-
-userStore = getUserStoreInstance()
+client = EvernoteClient(token=auth_token, sandbox=TESTING)
 try:
-    noteStore = getNoteStoreInstance(authToken, userStore)
+    note_store = client.get_note_store()
 except Exception, e:
     print "Error getting NoteStore instance:"
     print type(e)
@@ -89,45 +39,39 @@ except Exception, e:
 # You now have a ready-to-use Evernote client. Kaboom.
 ##
 
-# Retrieve the NoteStore URL for this user
-ourUser = userStore.getUser(authToken)
-noteStoreUrl = userStore.getNoteStoreUrl(authToken)
-
 # Verify our user belongs to a business
-if ourUser.accounting.businessId:
+user_store = client.get_user_store()
+our_user = user_store.getUser()
+if our_user.accounting.businessId:
     # this user is part of a business
-    print "Business %s" % ourUser.accounting.businessName
+    print "Business %s" % our_user.accounting.businessName
 else:
     print "This user does not belong to a Business"
     raise SystemExit
 
-# Authenticate to Evernote Business and grab the Business
-# NoteStore URL
-bAuthResult = authenticateToBusiness(authToken)
-if bAuthResult:
-    bNoteStoreUrl = bAuthResult.noteStoreUrl
+# Authenticate to Evernote Business and get Business User
+try:
+    biz_auth_result = user_store.authenticateToBusiness()
+    biz_user = biz_auth_result.user
     # Display the Business name if it's set (it may not be)
-    if bAuthResult.user.accounting.businessName:
+    if biz_user.accounting.businessName:
         print "You belong to the following Evernote Business: %s" % \
-            bAuthResult.user.accounting.businessName
-else:
+            biz_user.accounting.businessName
+except Exception, e:
     print "Error authenticating user to Evernote Business"
+    print type(e)
+    print e
     raise SystemExit
 
-# Retrieve the business auth token and use it to create
-# an instance of Business NoteStore
-bAuthToken = bAuthResult.authenticationToken
-bNoteStore = getNoteStoreInstance(bAuthToken, userStore)
-
-linkedNotebooks = noteStore.listLinkedNotebooks(authToken)
-bizNotebooks = []
-if len(linkedNotebooks):
+linked_notebooks = note_store.listLinkedNotebooks()
+biz_notebooks = []
+if len(linked_notebooks):
     print "The following Business notebooks are accessible to this user:"
-    for lnb in linkedNotebooks:
-        # If the `businessId` member is set, this is a link to a 
+    for lnb in linked_notebooks:
+        # If the `businessId` member is set, this is a link to a
         # Business notebook
         if hasattr(lnb, 'businessId'):
-            bizNotebooks.append(lnb)
+            biz_notebooks.append(lnb)
             print lnb.shareName
 else:
     print "This account currently has no linked notebooks"
@@ -136,13 +80,15 @@ else:
 # Create a new Business notebook and link it to the
 # current user's account.
 ##
+# Create an instance of Business NoteStore
+biz_note_store = client.get_business_note_store()
 # Create the local notebook object
-newBizNotebook = Types.Notebook()
+new_biz_notebook = Types.Notebook()
 # Give it a name
-newBizNotebook.name = getNonEmptyUserInput('Enter a notebook name: ')
+new_biz_notebook.name = get_non_empty_user_input('Enter a notebook name: ')
 # Create the notebook using the business NoteStore
 try:
-    newBizNotebook = bNoteStore.createNotebook(bAuthToken, newBizNotebook)
+    new_biz_notebook = biz_note_store.createNotebook(new_biz_notebook)
 except Exception, e:
     print "Error creating Business Notebook:"
     print "Exception type: %s" % type(e)
@@ -152,63 +98,42 @@ except Exception, e:
 # First, get the SharedNotebook instance for the notebook we just made
 # This is created automatically when the business notebook is created
 # and gives the creator full access to the notebook
-sharedBizNotebook = newBizNotebook.sharedNotebooks[0]
+shared_biz_notebook = new_biz_notebook.sharedNotebooks[0]
 # Create a LinkedNotebook instance
-linkedBizNotebook = Types.LinkedNotebook()
+linked_biz_notebook = Types.LinkedNotebook()
 # Assign it the share key and name of our business notebook
-linkedBizNotebook.shareKey = sharedBizNotebook.shareKey
-linkedBizNotebook.shareName = newBizNotebook.name
+linked_biz_notebook.shareKey = shared_biz_notebook.shareKey
+linked_biz_notebook.shareName = new_biz_notebook.name
 # Assign the user who owns the notebook
-linkedBizNotebook.username = bAuthResult.user.username
+linked_biz_notebook.username = biz_user.username
 # Assign the shard where the notebook lives
-linkedBizNotebook.shardId = bAuthResult.user.shardId
-# Create the linked notebook using the *normal user* auth token
+linked_biz_notebook.shardId = biz_user.shardId
+
+# Create the linked notebook using the *normal user* NoteStore
 try:
-    myLinkedBizNotebook = noteStore.createLinkedNotebook(authToken, linkedBizNotebook)
+    my_linked_biz_notebook = \
+        note_store.createLinkedNotebook(linked_biz_notebook)
 except Exception, e:
     print "Error creating LinkedNotebook:"
     print type(e)
     print e
     raise SystemExit
-# If this worked, the new business notebook will now be available 
+# If this worked, the new business notebook will now be available
 # to the creator in any Evernote app to which he/she is authenticated
 
 ##
-# Authenticate to the shared notebook so we can add a note
+# Now, create a note in Business Notebook (which we have access to)
 ##
-# Using non-Business NoteStore and the LinkedNotebook instance
-# from the previous step:
-try:
-    shareAuthResult = noteStore.authenticateToSharedNotebook(myLinkedBizNotebook.shareKey, authToken)
-except Exception, e:
-    print "Error authenticating to SharedNotebook"
-    print type(e)
-    print e
-    raise SystemExit
-
-# Capture authentication token for use in this instance
-shareAuthToken = shareAuthResult.authenticationToken
-# Get `Notebook` instance
-try:
-    sharedNotebook = bNoteStore.getSharedNotebookByAuth(shareAuthToken)
-except Exception, e:
-    print "Error getting SharedNotebook"
-    print type(e)
-    print e
-    raise SystemExit
-##
-# Now, create a note in sharedNotebook (which we have access to)
-##
-myNote = Types.Note()
-myNote.title = "I'm a test note!" 
-userInput = getNonEmptyUserInput('Enter the note contents (keep it short!): ')
-myNote.notebookGuid = newBizNotebook.guid
-content = '<?xml version="1.0" encoding="UTF-8"?>'
-content += '<!DOCTYPE en-note SYSTEM "http://xml.evernote.com/pub/enml2.dtd">'
-content += "<en-note>%s</en-note>" % userInput
-myNote.content = content
+my_note = Types.Note()
+my_note.title = "I'm a test note!"
+user_input = \
+    get_non_empty_user_input('Enter the note contents (keep it short!): ')
+my_note.notebookGuid = new_biz_notebook.guid
+my_note.content = '<?xml version="1.0" encoding="UTF-8"?>\
+    <!DOCTYPE en-note SYSTEM "http://xml.evernote.com/pub/enml2.dtd">\
+    <en-note>%s</en-note>' % user_input
 # Create a new note in the business notebook
 # if modifying an existing Note, call updateNote here
-myNote = bNoteStore.createNote(bAuthToken, myNote)
+my_note = biz_note_store.createNote(my_note)
 
-print "Note created with GUID: %s" % myNote.guid
+print "Note created with GUID: %s" % my_note.guid
